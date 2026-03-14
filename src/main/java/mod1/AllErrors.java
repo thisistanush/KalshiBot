@@ -1,11 +1,10 @@
-package java;
+package mod1;
 
 public class AllErrors {
-    public static class getHTTPSError extends Exception {
-        public getHTTPSError(String msg) {
+    public static class sendHTTPError extends Exception {
+        public sendHTTPError(String msg) {
             super(msg);
-            System.out.println("problem with teh getHTTPS method in Utils");
+            System.out.println("problem with the getHTTP method in Utils");
         }
     }
-
 }
