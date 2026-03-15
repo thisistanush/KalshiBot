@@ -21,8 +21,10 @@ public class Main {
         LinkedHashMap<String, String> headers = new LinkedHashMap<>();
         headers.put("Accept", "application/json");
 
+        System.out.println("Fetching markets...");
+
         KalshiModels.GetMarketsResponse marketResponse = Utils.getHTTP(
-                "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=1000",
+                "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=1000&status=settled",
                 headers, KalshiModels.GetMarketsResponse.class);
 
         if (marketResponse == null) {
@@ -33,13 +35,9 @@ public class Main {
         int num = 0;
 
         do {
-            if (marketResponse.markets == null) {
-                System.out.println("Null markets list on this page, skipping.");
-                break;
-            }
+            if (marketResponse.markets == null) break;
 
             for (int i = 0; i < marketResponse.markets.size(); i++) {
-                System.out.println("number of markets done: " + num);
                 KalshiModels.Market market = marketResponse.markets.get(i);
 
                 if (market == null) continue;
@@ -49,7 +47,6 @@ public class Main {
                 try {
                     settlementValue = Double.parseDouble(market.settlementValueDollars);
                 } catch (NumberFormatException e) {
-                    System.out.println("Bad settlementValueDollars for " + market.ticker + ", skipping.");
                     continue;
                 }
 
@@ -62,7 +59,6 @@ public class Main {
                     startTs = java.time.Instant.parse(market.openTime).getEpochSecond();
                     endTs   = java.time.Instant.parse(market.closeTime).getEpochSecond();
                 } catch (Exception e) {
-                    System.out.println("Bad open/close time for " + market.ticker + ", skipping.");
                     continue;
                 }
 
@@ -73,10 +69,7 @@ public class Main {
                                 + market.ticker + "/candlesticks" + query,
                         headers, KalshiModels.GetMarketCandlesticksResponse.class);
 
-                if (candlestickResponse == null || candlestickResponse.candlesticks == null) {
-                    System.out.println("Null candlestick response for " + market.ticker + ", skipping.");
-                    continue;
-                }
+                if (candlestickResponse == null || candlestickResponse.candlesticks == null) continue;
 
                 for (int z = 0; z < candlestickResponse.candlesticks.size(); z++) {
                     KalshiModels.MarketCandlestick candle = candlestickResponse.candlesticks.get(z);
@@ -92,7 +85,6 @@ public class Main {
                         ask    = Double.parseDouble(candle.yesAsk.closeDollars);
                         volume = Double.parseDouble(candle.volumeFp);
                     } catch (NumberFormatException e) {
-                        System.out.println("Bad numeric field in candle for " + market.ticker + ", skipping candle.");
                         continue;
                     }
 
@@ -118,20 +110,20 @@ public class Main {
                         }
                     }
                 }
+
                 num++;
+                System.out.println("Markets processed: " + num);
             }
 
             String cursor = marketResponse.cursor;
             if (cursor == null || cursor.isEmpty()) break;
 
             marketResponse = Utils.getHTTP(
-                    "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=1000&cursor=" + cursor,
+                    "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=1000&status=settled&cursor=" + cursor,
                     headers, KalshiModels.GetMarketsResponse.class);
 
-            if (marketResponse == null) {
-                System.out.println("Null response on paginated fetch, stopping pagination.");
-                break;
-            }
+            if (marketResponse == null) break;
+
         } while (true);
 
         try (BufferedWriter writer = new BufferedWriter(new FileWriter("price_history"))) {
