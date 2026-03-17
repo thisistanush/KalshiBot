@@ -69,7 +69,7 @@ public class Utils {
 
             while (response.code() == 429) {
                 response.close();
-                Thread.sleep(1);
+                Thread.sleep(50);
                 response = client.newCall(request).execute();
             }
 

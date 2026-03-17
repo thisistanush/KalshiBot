@@ -3,6 +3,7 @@ package mod1;
 import GsonClasses.*;
 
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.FileWriter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -10,22 +11,21 @@ import java.util.LinkedHashMap;
 public class Main {
     public static void main(String[] args) throws Exception {
 
-        ArrayList<PriceTemp> priceUpChart = new ArrayList<>();
-        ArrayList<PriceTemp> priceDownChart = new ArrayList<>();
+        int MAX_CANDLES = 15;
+        ArrayList<CandlestickHistory> candlestickPriceHistories = new ArrayList<>();
 
-        for (int i = 0; i < 9; i++) {
-            priceDownChart.add(new PriceTemp(i * 0.05, (i * 0.05) + 0.05));
-            priceUpChart.add(new PriceTemp((i * 0.05) + 0.5, (i * 0.05) + 0.55));
+        for (int i = 0; i < MAX_CANDLES; i++) {
+            candlestickPriceHistories.add(new CandlestickHistory(i));
         }
 
         LinkedHashMap<String, String> headers = new LinkedHashMap<>();
         headers.put("Accept", "application/json");
 
-        System.out.println("Fetching markets...");
-
         KalshiModels.GetMarketsResponse marketResponse = Utils.getHTTP(
                 "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=1000&status=settled",
-                headers, KalshiModels.GetMarketsResponse.class);
+                headers,
+                KalshiModels.GetMarketsResponse.class
+        );
 
         if (marketResponse == null) {
             System.out.println("Failed to fetch initial market response. Exiting.");
@@ -50,7 +50,14 @@ public class Main {
                     continue;
                 }
 
-                boolean settledYes = (settlementValue == 1.00);
+                // Use threshold instead of float equality
+                // settlementValue > 0.5 means YES won, <= 0.5 means NO won
+                boolean yesWon;
+                if (settlementValue > 0.5) {
+                    yesWon = true;
+                } else {
+                    yesWon = false;
+                }
 
                 if (market.openTime == null || market.closeTime == null) continue;
 
@@ -65,48 +72,126 @@ public class Main {
                 String query = "?start_ts=" + startTs + "&end_ts=" + endTs + "&period_interval=1";
 
                 KalshiModels.GetMarketCandlesticksResponse candlestickResponse = Utils.getHTTP(
-                        "https://api.elections.kalshi.com/trade-api/v2/series/KXBTC15M/markets/"
-                                + market.ticker + "/candlesticks" + query,
-                        headers, KalshiModels.GetMarketCandlesticksResponse.class);
+                        "https://api.elections.kalshi.com/trade-api/v2/series/KXBTC15M/markets/" + market.ticker + "/candlesticks" + query,
+                        headers,
+                        KalshiModels.GetMarketCandlesticksResponse.class
+                );
 
                 if (candlestickResponse == null || candlestickResponse.candlesticks == null) continue;
 
-                for (int z = 0; z < candlestickResponse.candlesticks.size(); z++) {
-                    KalshiModels.MarketCandlestick candle = candlestickResponse.candlesticks.get(z);
+                int candleCount = candlestickResponse.candlesticks.size();
 
+                for (int z = 0; z < candleCount; z++) {
+
+                    // Bounds check — skip if we somehow get more candles than expected
+                    if (z >= candlestickPriceHistories.size()) break;
+
+                    KalshiModels.MarketCandlestick candle = candlestickResponse.candlesticks.get(z);
                     if (candle == null) continue;
                     if (candle.yesBid == null || candle.yesAsk == null) continue;
                     if (candle.yesBid.closeDollars == null || candle.yesAsk.closeDollars == null) continue;
-                    if (candle.volumeFp == null) continue;
 
-                    double bid, ask, volume;
+                    double yesBidClose;
+                    double yesAskClose;
                     try {
-                        bid    = Double.parseDouble(candle.yesBid.closeDollars);
-                        ask    = Double.parseDouble(candle.yesAsk.closeDollars);
-                        volume = Double.parseDouble(candle.volumeFp);
+                        yesBidClose = Double.parseDouble(candle.yesBid.closeDollars);
+                        yesAskClose = Double.parseDouble(candle.yesAsk.closeDollars);
                     } catch (NumberFormatException e) {
                         continue;
                     }
 
-                    double mid = (bid + ask) / 2.0;
+                    // Mid-quote: the correct probability estimate, not meanDollars
+                    double midQuote = (yesBidClose + yesAskClose) / 2.0;
 
-                    if (mid > 0.5) {
-                        for (int x = 0; x < priceUpChart.size(); x++) {
-                            PriceTemp bucket = priceUpChart.get(x);
-                            if (mid > bucket.getBottomDollarsLevel() && mid < bucket.getTopDollarsLevel()) {
-                                bucket.addTotalNumberOfHits();
-                                if (settledYes) bucket.addNumberOfWins();
-                                bucket.addLiquidityVolume(volume);
-                            }
+                    CandlestickHistory history = candlestickPriceHistories.get(z);
+
+                    if (midQuote >= 0.5) {
+                        // YES side prediction
+                        history.addYesHit();
+                        if (yesWon) {
+                            history.addYesWin();
                         }
                     } else {
-                        for (int x = 0; x < priceDownChart.size(); x++) {
-                            PriceTemp bucket = priceDownChart.get(x);
-                            if (mid > bucket.getBottomDollarsLevel() && mid < bucket.getTopDollarsLevel()) {
-                                bucket.addTotalNumberOfHits();
-                                if (!settledYes) bucket.addNumberOfWins();
-                                bucket.addLiquidityVolume(volume);
+                        // NO side prediction
+                        history.addNoHit();
+                        if (!yesWon) {
+                            history.addNoWin();
+                        }
+                    }
+
+                    // Reversal analysis:
+                    // Check whether any later candle in this same market crossed back over 0.5
+                    if (midQuote >= 0.5) {
+                        // We are on the YES side at candle z.
+                        // Check if any candle after z crosses below 0.5.
+                        boolean reversed = false;
+                        double maxCrossBelow = midQuote; // track how far it went
+
+                        for (int r = z + 1; r < candleCount; r++) {
+                            KalshiModels.MarketCandlestick laterCandle = candlestickResponse.candlesticks.get(r);
+                            if (laterCandle == null) continue;
+                            if (laterCandle.yesBid == null || laterCandle.yesAsk == null) continue;
+                            if (laterCandle.yesBid.closeDollars == null || laterCandle.yesAsk.closeDollars == null) continue;
+
+                            double laterBid;
+                            double laterAsk;
+                            try {
+                                laterBid = Double.parseDouble(laterCandle.yesBid.closeDollars);
+                                laterAsk = Double.parseDouble(laterCandle.yesAsk.closeDollars);
+                            } catch (NumberFormatException e) {
+                                continue;
                             }
+
+                            double laterMid = (laterBid + laterAsk) / 2.0;
+
+                            if (laterMid < 0.5) {
+                                reversed = true;
+                                // Magnitude = how far below 0.5 it crossed
+                                double distanceBelow = 0.5 - laterMid;
+                                if (distanceBelow > maxCrossBelow) {
+                                    maxCrossBelow = distanceBelow;
+                                }
+                            }
+                        }
+
+                        if (reversed) {
+                            history.addYesReversal(maxCrossBelow);
+                        }
+
+                    } else {
+                        // We are on the NO side at candle z.
+                        // Check if any candle after z crosses above 0.5.
+                        boolean reversed = false;
+                        double maxCrossAbove = 0.0;
+
+                        for (int r = z + 1; r < candleCount; r++) {
+                            KalshiModels.MarketCandlestick laterCandle = candlestickResponse.candlesticks.get(r);
+                            if (laterCandle == null) continue;
+                            if (laterCandle.yesBid == null || laterCandle.yesAsk == null) continue;
+                            if (laterCandle.yesBid.closeDollars == null || laterCandle.yesAsk.closeDollars == null) continue;
+
+                            double laterBid;
+                            double laterAsk;
+                            try {
+                                laterBid = Double.parseDouble(laterCandle.yesBid.closeDollars);
+                                laterAsk = Double.parseDouble(laterCandle.yesAsk.closeDollars);
+                            } catch (NumberFormatException e) {
+                                continue;
+                            }
+
+                            double laterMid = (laterBid + laterAsk) / 2.0;
+
+                            if (laterMid >= 0.5) {
+                                reversed = true;
+                                double distanceAbove = laterMid - 0.5;
+                                if (distanceAbove > maxCrossAbove) {
+                                    maxCrossAbove = distanceAbove;
+                                }
+                            }
+                        }
+
+                        if (reversed) {
+                            history.addNoReversal(maxCrossAbove);
                         }
                     }
                 }
@@ -120,30 +205,21 @@ public class Main {
 
             marketResponse = Utils.getHTTP(
                     "https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&limit=1000&status=settled&cursor=" + cursor,
-                    headers, KalshiModels.GetMarketsResponse.class);
-
+                    headers,
+                    KalshiModels.GetMarketsResponse.class
+            );
             if (marketResponse == null) break;
 
         } while (true);
 
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter("price_history"))) {
-            writer.write("=== YES buckets (mid > 0.50) ===");
-            writer.newLine();
-            for (int i = 0; i < priceUpChart.size(); i++) {
-                writer.write(priceUpChart.get(i).toString());
-                writer.newLine();
-                writer.newLine();
-            }
-
-            writer.write("=== NO buckets (mid < 0.50) ===");
-            writer.newLine();
-            for (int i = 0; i < priceDownChart.size(); i++) {
-                writer.write(priceDownChart.get(i).toString());
-                writer.newLine();
+        File file = new File("price_history.txt");
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(file, true))) {
+            for (int i = 0; i < candlestickPriceHistories.size(); i++) {
+                writer.write(candlestickPriceHistories.get(i).toString());
                 writer.newLine();
             }
         }
 
-        System.out.println("Done. Results written to price_history.");
+        System.out.println("Done. Results written to price_history.txt");
     }
 }
