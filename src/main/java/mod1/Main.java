@@ -34,26 +34,52 @@ public class Main {
             if (marketResponse.markets == null) break;
 
             for (int i = 0; i < marketResponse.markets.size(); i++) {
+                if(marketResponse.markets.get(i) == null) continue;
+                if(marketResponse.markets.get(i).settlementValueDollars == null) continue;
+                if(marketResponse.markets.get(i).openTime == null) continue;
+                if(marketResponse.markets.get(i).closeTime == null) continue;
+
                 String ticker = marketResponse.markets.get(i).ticker;
-                KalshiModels.GetMarketCandlesticksResponse currentMarketCandlesticks = Utils.getHTTP("http://api.elections.kalshi.com/trade-api/v2/series/KXBTC15M/markets/" + ticker + "/candlesticks?start_ts=" + java.time.Instant.parse(marketResponse.markets.get(i).openTime).getEpochSecond() + "&end_ts=" + java.time.Instant.parse(marketResponse.markets.get(i).closeTime).getEpochSecond() + "&period_interval=1", headers, KalshiModels.GetMarketCandlesticksResponse.class);
-                double winnerPrice = Double.parseDouble(currentMarketCandlesticks.candlesticks.get(14).price.closeDollars);
+                double settlementValue = Double.parseDouble(marketResponse.markets.get(i).settlementValueDollars);
+
+                KalshiModels.GetMarketCandlesticksResponse currentMarketCandlesticks = Utils.getHTTP(
+                        "https://api.elections.kalshi.com/trade-api/v2/series/KXBTC15M/markets/" + ticker +
+                                "/candlesticks?start_ts=" + java.time.Instant.parse(marketResponse.markets.get(i).openTime).getEpochSecond() +
+                                "&end_ts=" + java.time.Instant.parse(marketResponse.markets.get(i).closeTime).getEpochSecond() +
+                                "&period_interval=1",
+                        headers,
+                        KalshiModels.GetMarketCandlesticksResponse.class
+                );
+
+                if(currentMarketCandlesticks == null || currentMarketCandlesticks.candlesticks == null) continue;
 
                 for(int x = 0; x < currentMarketCandlesticks.candlesticks.size(); x++){
-                    double price = (Double.parseDouble(currentMarketCandlesticks.candlesticks.get(x).yesBid.closeDollars) + Double.parseDouble(currentMarketCandlesticks.candlesticks.get(x).yesAsk.closeDollars)) / 2.0;
-                    candlesticks.get(x).addHit(getPriceString(price));
+                    if(x >= candlesticks.size()) break;
+
+                    KalshiModels.MarketCandlestick candle = currentMarketCandlesticks.candlesticks.get(x);
+                    if(candle == null) continue;
+                    if(candle.yesBid == null || candle.yesAsk == null) continue;
+                    if(candle.yesBid.closeDollars == null || candle.yesAsk.closeDollars == null) continue;
+                    if(candle.volumeFp == null) continue;
+
+                    double price = (Double.parseDouble(candle.yesBid.closeDollars) + Double.parseDouble(candle.yesAsk.closeDollars)) / 2.0;
+                    String priceKey = getPriceString(price);
+                    if(priceKey == null) continue;
+
+                    candlesticks.get(x).addHit(priceKey);
+                    candlesticks.get(x).addLiquidity(Double.parseDouble(candle.volumeFp));
 
                     if(price >= 0.5){
-                        if(winnerPrice == 1.0){
-                            candlesticks.get(x).addHit(getPriceString(price));
+                        if(settlementValue > 0.5){
+                            candlesticks.get(x).addWin(priceKey);
                         }
                     }else{
-                        if(winnerPrice == 0.0){
-
-                        }else{
-
+                        if(settlementValue <= 0.5){
+                            candlesticks.get(x).addWin(priceKey);
                         }
                     }
                 }
+
                 num++;
                 System.out.println("Markets " + num + " processed");
             }
@@ -77,7 +103,7 @@ public class Main {
         File file = new File("price_history.txt");
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(file, true))) {
             for (int i = 0; i < candlesticks.size(); i++) {
-
+                writer.write(candlesticks.get(i).toString());
                 writer.newLine();
             }
         }
